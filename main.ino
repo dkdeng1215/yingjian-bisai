@@ -116,12 +116,16 @@ struct SensorSlot {
 
 SensorSlot slots[3];  // slots[LEFT] / slots[CENTER] / slots[RIGHT]
 
-bool readRawDistance(Direction dir,uint16_t &out){
-    if(!selectTofChannel(dir))return false;
-    if(!slots[dir].tof.dataReady())return false;
-    out=slots[dir].tof.distance();
+bool readRawDistance(Direction dir, uint16_t &out){
+    if(!selectTofChannel(dir)) return false;
+    if(!slots[dir].tof.dataReady()) return false;
+    int16_t dist = slots[dir].tof.distance();  // 有符号，负值是错误码
+    slots[dir].tof.clearInterrupt();             // 清除中断，传感器开始下一次测距
+    if(dist < 0) return false;                   // 错误码视为无效
+    out = (uint16_t)dist;
     return true;
-  }//读取传感器原始数据的函数
+}
+//读取传感器原始数据的函数
 
 bool isDistanceValid(uint16_t distance) {
     return (distance >= DISTANCE_MIN_MM && distance <= DISTANCE_MAX_MM);
@@ -164,7 +168,7 @@ uint16_t mediateData(Direction dir){
 SystemState getSystemState(){
   SystemState state;
   for(int i=0;i<3;i++){
-    state.zones[i].distanceMm=mediateData(i);
+    state.zones[i].distanceMm=mediateData((Direction)i);
     state.zones[i].valid=(millis()-slots[i].lastValidMs<SENSOR_STALE_MS);
   }
   state.anySensorInvalid = !state.zones[0].valid || !state.zones[1].valid || !state.zones[2].valid;
@@ -212,6 +216,107 @@ void setup() {
   }//初始化激光传感器
 }
 
-void loop() {
+// ---------- 调试输出辅助函数 ----------
 
+// 打印单个方向的距离和状态，固定宽度对齐
+void printZone(const char *label, ZoneState zone) {
+  Serial.print(label);
+  Serial.print(":");
+  if (zone.valid) {
+    // 距离占4位右对齐
+    if (zone.distanceMm < 10) Serial.print("   ");
+    else if (zone.distanceMm < 100) Serial.print("  ");
+    else if (zone.distanceMm < 1000) Serial.print(" ");
+    Serial.print(zone.distanceMm);
+    Serial.print(" ");
+  } else {
+    Serial.print("  -- ");  // 失效显示 --
+  }
+}
+
+// 打印激活方向（位掩码转中文），固定宽度
+void printActiveDirections(uint8_t active) {
+  if (active == 0) {
+    Serial.print("无   ");
+    return;
+  }
+  uint8_t count = 0;
+  if (active & (1 << LEFT))   { Serial.print("左"); count++; }
+  if (active & (1 << CENTER)) { Serial.print("中"); count++; }
+  if (active & (1 << RIGHT))  { Serial.print("右"); count++; }
+  for (uint8_t i = count; i < 3; i++) Serial.print(" ");
+}
+
+// ---------- 主循环 ----------
+
+void loop() {
+  uint32_t nowMs = millis();
+
+  // 1. 感知更新（每45ms轮询一个传感器，不阻塞）
+  Schedule(nowMs);
+
+  // 2. 每250ms输出一次调试日志
+  static uint32_t lastLogMs = 0;
+  if (nowMs - lastLogMs < LOG_INTERVAL_MS) {
+    return;
+  }
+  lastLogMs = nowMs;
+
+  // 第一次运行打印表头
+  static bool firstRun = true;
+  if (firstRun) {
+    firstRun = false;
+    Serial.println();
+    Serial.println("===== 调试日志 =====");
+    Serial.println("[时间ms]  L     C     R      | 激活 风险    大范围 异常");
+    Serial.println("-------------------------------------------------------");
+  }
+
+  // 3. 获取感知结果
+  SystemState state = getSystemState();
+
+  // 4. 决策
+  FeedbackDecision decision = decideFeedback(state);
+
+  // 5. 格式化输出
+  Serial.print("[");
+  if (nowMs < 10) Serial.print("    ");
+  else if (nowMs < 100) Serial.print("   ");
+  else if (nowMs < 1000) Serial.print("  ");
+  else if (nowMs < 10000) Serial.print(" ");
+  Serial.print(nowMs);
+  Serial.print("ms] ");
+
+  // 三个方向的距离和状态
+  printZone("L", state.zones[LEFT]);
+  printZone("C", state.zones[CENTER]);
+  printZone("R", state.zones[RIGHT]);
+
+  Serial.print("| ");
+
+  // 决策结果
+  Serial.print("激活:");
+  printActiveDirections(decision.activeDirections);
+
+  Serial.print("风险:");
+  const char *riskStr = riskName(decision.risk);
+  Serial.print(riskStr);
+  // 风险名称补空格对齐（SAFE=4, NOTICE=6, WARN=4, DANGER=6）
+  uint8_t riskLen = 0;
+  while (riskStr[riskLen] != '\0') riskLen++;
+  for (uint8_t i = riskLen; i < 6; i++) Serial.print(" ");
+
+  Serial.print("大范围:");
+  Serial.print(decision.isWideObstacle ? "是  " : "否  ");
+
+  Serial.print("异常:");
+  if (state.allSensorsInvalid) {
+    Serial.print("全部失效");
+  } else if (state.anySensorInvalid) {
+    Serial.print("部分失效");
+  } else {
+    Serial.print("无    ");
+  }
+
+  Serial.println();
 }

@@ -78,29 +78,44 @@ bool isWideObstacle(const ZoneState &left, const ZoneState &right) {
 }
 
 FeedbackDecision decideFeedback(const SystemState &state) {
-  FeedbackDecision decision;
-  decision.activeDirections = 0;
-  decision.risk = SAFE;
-  decision.isWideObstacle = false;
-  if (state.allSensorsInvalid) return decision;
-
+  static RiskLevel lastRisk[3] = {SAFE, SAFE, SAFE};
+  FeedbackDecision decision = {0, SAFE, false};
+  if (state.allSensorsInvalid) {
+    lastRisk[LEFT] = lastRisk[CENTER] = lastRisk[RIGHT] = SAFE;
+    return decision;
+  }
   int nearest = -1;
   uint16_t nearestDistance = 0xffff;
   for (uint8_t i = 0; i < 3; ++i) {
-    if (obstacle(state.zones[i]) && state.zones[i].distanceMm < nearestDistance) {
-      nearest = i;
-      nearestDistance = state.zones[i].distanceMm;
+    if (!state.zones[i].valid) { lastRisk[i] = SAFE; continue; }
+    lastRisk[i] = classifyRiskWithHysteresis(lastRisk[i], state.zones[i].distanceMm);
+    if (lastRisk[i] != SAFE && state.zones[i].distanceMm < nearestDistance) {
+      nearest = i; nearestDistance = state.zones[i].distanceMm;
     }
   }
   if (nearest < 0) return decision;
-
-  decision.risk = classifyRisk(nearestDistance);
   decision.activeDirections = static_cast<uint8_t>(1u << nearest);
-  if (isWideObstacle(state.zones[LEFT], state.zones[RIGHT])) {
+  const bool wide = state.zones[LEFT].valid && state.zones[RIGHT].valid &&
+                    lastRisk[LEFT] != SAFE && lastRisk[RIGHT] != SAFE &&
+                    isWideObstacle(state.zones[LEFT], state.zones[RIGHT]);
+  if (wide) {
     decision.activeDirections = (1u << LEFT) | (1u << RIGHT);
     decision.isWideObstacle = true;
-    // 左右同时提醒时仍使用三路中最高（最近）风险。
+    if (lastRisk[CENTER] != SAFE &&
+        state.zones[CENTER].distanceMm < state.zones[LEFT].distanceMm &&
+        state.zones[CENTER].distanceMm < state.zones[RIGHT].distanceMm)
+      decision.activeDirections |= (1u << CENTER);
   }
+  // risk 取所有激活方向中最高的风险等级
+  RiskLevel maxRisk = SAFE;
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (decision.activeDirections & (1u << i)) {
+      if (lastRisk[i] > maxRisk) {
+        maxRisk = lastRisk[i];
+      }
+    }
+  }
+  decision.risk = maxRisk;
   return decision;
 }
 
