@@ -20,22 +20,24 @@
 #define TOF_LEFT_CHANNEL 0
 #define TOF_CENTER_CHANNEL 1
 #define TOF_RIGHT_CHANNEL 2
-/* ---------- Scheduling ----------
-#define SERIAL_BAUD_RATE            115200UL
-#define SERIAL_STARTUP_DELAY_MS     1000
+//---------- Scheduling ----------
+#define SERIAL_BAUD_RATE 115200UL
+#define SERIAL_STARTUP_DELAY_MS 1000
 
-#define TOF_POLL_INTERVAL_MS        45
-#define SENSOR_STALE_MS             500
-#define LOG_INTERVAL_MS             250
-#define FEEDBACK_WATCHDOG_TIMEOUT_MS 200 */
+#define TOF_POLL_INTERVAL_MS 45
+#define SENSOR_STALE_MS 500
+#define LOG_INTERVAL_MS 250
+#define FEEDBACK_WATCHDOG_TIMEOUT_MS 200
 // 传感器测量距离
 #define DISTANCE_MAX_MM 4000
 #define DISTANCE_MIN_MM 40
-// #define FILTER_WINDOW_SIZE          5
+#define FILTER_WINDOW_SIZE          5
 // TOF测量值过滤
 // 危险距离等级
 #define DANGER_THRESHOLD_MM 400
 #define WARN_THRESHOLD_MM 800
 #define NOTICE_THRESHOLD_MM 1200
+
+
 
 #endif
