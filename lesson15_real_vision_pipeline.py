@@ -310,6 +310,7 @@ def _draw_overlay(
     *,
     detected: bool,
     present: bool,
+    candidate_kind: str,
     bbox: tuple[int, int, int, int] | None,
     command: str | None,
     range_mm: int | None,
@@ -338,7 +339,7 @@ def _draw_overlay(
     speed_text = "-" if speed_mm_s is None else f"{int(speed_mm_s)}mm/s"
     command_text = command if command is not None else "DISCARD"
     lines = [
-        f"detected={int(detected)} present={int(present)}",
+        f"detected={int(detected)} present={int(present)} kind={candidate_kind}",
         f"tof={range_text} speed={speed_text}",
         f"command={command_text} detect={detect_ms:.1f}ms",
     ]
@@ -368,6 +369,7 @@ def run_video(args: argparse.Namespace) -> int:
     import numpy as np
     from lesson08_pipeline import detect_one_frame_detailed
     from lesson16_morphology_debug import detect_edge_block_frame
+    from lesson17_wall_texture_debug import analyze_wall_texture
 
     video_path = Path(args.video)
     if not video_path.is_file():
@@ -447,7 +449,8 @@ def run_video(args: argparse.Namespace) -> int:
     print(
         f"video={video_path} source_fps={source_fps:.2f} "
         f"target_fps={args.fps if args.fps > 0 else source_fps:.2f} "
-        f"tof_mode={args.tof_mode} detector={args.detector}"
+        f"tof_mode={args.tof_mode} detector={args.detector} "
+        f"wall_branch={int(args.enable_wall_branch)}"
     )
     print(
         "frame  time_s  det pres  range  speed  command  reason"
@@ -492,8 +495,10 @@ def run_video(args: argparse.Namespace) -> int:
         bbox = None
         rejected_bbox = None
         detection_debug: dict[str, Any] | None = None
+        wall_debug: dict[str, Any] | None = None
         debug_edges = None
         detect_ms = 0.0
+        candidate_kind = "invalid" if not frame_valid else "none"
 
         if frame_valid:
             source_height, source_width = frame.shape[:2]
@@ -527,6 +532,7 @@ def run_video(args: argparse.Namespace) -> int:
             detect_times_ms.append(detect_ms)
             detected = bool(detection["detected"])
             bbox = detection["bbox"]
+            candidate_kind = "edge_block" if detected and args.detector == "edge-block" else "contour" if detected else "none"
             detection_debug = {
                 key: value
                 for key, value in detection.items()
@@ -536,6 +542,28 @@ def run_video(args: argparse.Namespace) -> int:
             largest_candidate = detection.get("largest_candidate")
             if bbox is None and largest_candidate is not None:
                 rejected_bbox = largest_candidate["bbox"]
+
+            if args.enable_wall_branch and not detected:
+                wall_result = analyze_wall_texture(
+                    gray,
+                    canny_low=args.canny_low,
+                    canny_high=args.canny_high,
+                    min_brightness=args.wall_min_brightness,
+                    max_brightness=args.wall_max_brightness,
+                    min_brightness_std=args.wall_min_brightness_std,
+                    max_edge_pixel_ratio=args.wall_max_edge_ratio,
+                    max_cell_edge_pixel_ratio=args.wall_max_cell_edge_ratio,
+                    min_low_texture_cell_ratio=args.wall_min_low_texture_cell_ratio,
+                )
+                wall_debug = {
+                    key: value
+                    for key, value in wall_result.items()
+                    if key not in {"cells", "debug_edges"}
+                }
+                if wall_result["candidate_wall"]:
+                    detected = True
+                    bbox = tuple(wall_result["roi_bbox"])
+                    candidate_kind = "low_texture_wall"
 
         temporal = temporal_filter.update(valid=frame_valid, detected=detected)
         geometry = geometry_from_bbox(
@@ -552,6 +580,7 @@ def run_video(args: argparse.Namespace) -> int:
             "width_ratio": geometry["width_ratio"],
             "bottom_row_ratio": geometry["bottom_row_ratio"],
             "consecutive_present": temporal.hit_streak,
+            "candidate_kind": candidate_kind,
             "reason": temporal.reason,
         }
 
@@ -613,12 +642,25 @@ def run_video(args: argparse.Namespace) -> int:
                     f"reject={candidate['reject_reason']}"
                 )
 
+        if args.print_debug and wall_debug is not None:
+            print(
+                "        wall: "
+                f"candidate={int(wall_debug['candidate_wall'])} "
+                f"brightness={wall_debug['mean_brightness']:.1f} "
+                f"std={wall_debug['brightness_std']:.1f} "
+                f"edges={wall_debug['edge_pixel_ratio']:.4f} "
+                f"low_cells={wall_debug['low_texture_cell_count']}/"
+                f"{wall_debug['grid_rows'] * wall_debug['grid_cols']} "
+                f"reject={wall_debug['reject_reason']}"
+            )
+
         if (writer is not None or args.display) and frame_valid:
             annotated = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR) if frame.ndim == 2 else frame.copy()
             _draw_overlay(
                 annotated,
                 detected=detected,
                 present=temporal.present,
+                candidate_kind=candidate_kind,
                 bbox=bbox,
                 command=fusion_result.command,
                 range_mm=fusion_result.range_mm,
@@ -661,9 +703,11 @@ def run_video(args: argparse.Namespace) -> int:
                 "source_frame_index": source_frame_index - 1,
                 **fusion_result.to_dict(),
                 "detected": detected,
+                "candidate_kind": candidate_kind,
                 "bbox": list(bbox) if bbox is not None else None,
                 "geometry": geometry,
                 "detection_debug": detection_debug,
+                "wall_debug": wall_debug,
                 "detect_ms": detect_ms,
             "tof_mode": args.tof_mode,
             "source_frame": {
@@ -791,6 +835,10 @@ def run_self_check(
         detect_edge_block_frame,
         make_edge_block_test_frame,
     )
+    from lesson17_wall_texture_debug import (
+        analyze_wall_texture,
+        make_test_frame as make_wall_test_frame,
+    )
 
     detection = detect_one_frame_detailed(make_test_frame("obstacle"))
     candidate = detection["largest_candidate"]
@@ -814,6 +862,19 @@ def run_self_check(
         canny_high=150,
     )
     assert not empty_edge_detection["detected"], empty_edge_detection
+
+    wall_detection = analyze_wall_texture(
+        make_wall_test_frame("wall"),
+        canny_low=20,
+        canny_high=60,
+    )
+    assert wall_detection["candidate_wall"], wall_detection
+    textured_wall_detection = analyze_wall_texture(
+        make_wall_test_frame("textured"),
+        canny_low=20,
+        canny_high=60,
+    )
+    assert not textured_wall_detection["candidate_wall"], textured_wall_detection
 
     temporal = TemporalVisionFilter()
     states = []
@@ -894,6 +955,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="contour is the original closed-contour rule; edge-block is experimental",
     )
     parser.add_argument(
+        "--enable-wall-branch",
+        action="store_true",
+        help="fall back to a low-texture wall candidate when the primary detector misses",
+    )
+    parser.add_argument("--wall-min-brightness", type=float, default=35.0)
+    parser.add_argument("--wall-max-brightness", type=float, default=225.0)
+    parser.add_argument("--wall-min-brightness-std", type=float, default=1.5)
+    parser.add_argument("--wall-max-edge-ratio", type=float, default=0.003)
+    parser.add_argument("--wall-max-cell-edge-ratio", type=float, default=0.006)
+    parser.add_argument("--wall-min-low-texture-cell-ratio", type=float, default=0.75)
+    parser.add_argument(
         "--tof-mode",
         choices=["approaching", "near", "far", "invalid", "none", "file"],
         default="approaching",
@@ -927,7 +999,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--show-rejected",
         action="store_true",
-        help="draw the largest rejected candidate in red",
+        help="draw the largest rejected candidate in blue",
     )
     parser.add_argument(
         "--print-debug",
@@ -960,6 +1032,16 @@ def main() -> int:
         return 2
     if args.tof_mode == "file" and not args.tof_jsonl:
         parser.error("--tof-mode file requires --tof-jsonl")
+    if not 0 <= args.wall_min_brightness <= args.wall_max_brightness <= 255:
+        parser.error("wall brightness must satisfy 0 <= min <= max <= 255")
+    if args.wall_min_brightness_std < 0:
+        parser.error("--wall-min-brightness-std cannot be negative")
+    if not 0 <= args.wall_max_edge_ratio <= 1:
+        parser.error("--wall-max-edge-ratio must be between 0 and 1")
+    if not 0 <= args.wall_max_cell_edge_ratio <= 1:
+        parser.error("--wall-max-cell-edge-ratio must be between 0 and 1")
+    if not 0 <= args.wall_min_low_texture_cell_ratio <= 1:
+        parser.error("--wall-min-low-texture-cell-ratio must be between 0 and 1")
 
     return run_video(args)
 
